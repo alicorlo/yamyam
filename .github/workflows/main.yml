@@ -1,0 +1,83 @@
+
+name: Windows Remote Desktop
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows-server:
+    runs-on: windows-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Configure Windows
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          $password = "WinRDP-" + [guid]::NewGuid().ToString("N") + "aA1!"
+
+          $securePassword = ConvertTo-SecureString `
+            $password -AsPlainText -Force
+
+          New-LocalUser `
+            -Name "RDPUser" `
+            -Password $securePassword `
+            -AccountNeverExpires
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "RDPUser"
+
+          "RDP_PASSWORD=$password" |
+            Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install ngrok
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" `
+            -OutFile "$env:TEMP\ngrok.zip"
+
+          Expand-Archive `
+            -Path "$env:TEMP\ngrok.zip" `
+            -DestinationPath "$env:TEMP\ngrok" `
+            -Force
+
+          Copy-Item "$env:TEMP\ngrok\ngrok.exe" `
+            "$env:RUNNER_TEMP\ngrok.exe"
+
+      - name: Start RDP tunnel
+        shell: pwsh
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+        run: |
+          & "$env:RUNNER_TEMP\ngrok.exe" config add-authtoken $env:NGROK_AUTHTOKEN
+
+          $ngrok = Start-Process `
+            -FilePath "$env:RUNNER_TEMP\ngrok.exe" `
+            -ArgumentList "tcp 3389" `
+            -PassThru `
+            -WindowStyle Hidden
+
+          Start-Sleep -Seconds 10
+
+          $tunnel = Invoke-RestMethod `
+            -Uri "http://127.0.0.1:4040/api/tunnels"
+
+          $address = $tunnel.tunnels[0].public_url
+
+          Write-Host "RDP ADDRESS: $address"
+          Write-Host "RDP USERNAME: RDPUser"
+          Write-Host "RDP PASSWORD: $env:RDP_PASSWORD"
+
+          while (-not $ngrok.HasExited) {
+            Start-Sleep -Seconds 30
+          }
